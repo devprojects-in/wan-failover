@@ -1,111 +1,206 @@
-# WAN Failover — complete install map
+# WAN Failover — Automatic Multi-WAN Internet Failover for Linux Servers
 
-## Exactly what goes where
+**Keep your server online even when your primary internet connection drops.**
+A lightweight, self-hosted failover system for Linux servers with multiple
+internet uplinks (multi-WAN / dual-WAN / quad-WAN setups). Automatically
+detects when your primary connection goes down, switches traffic to a
+backup line, and switches back the moment the primary recovers — with
+email alerts and a web dashboard for manual control.
 
-| File you have | Exact destination on the server | Command |
-|---|---|---|
-| `wan-failover.sh` | `/usr/local/bin/wan-failover.sh` | `sudo cp wan-failover.sh /usr/local/bin/wan-failover.sh && sudo chmod +x /usr/local/bin/wan-failover.sh` |
-| `wan-failover.service` | `/etc/systemd/system/wan-failover.service` | `sudo cp wan-failover.service /etc/systemd/system/wan-failover.service` |
-| `mail.env` | `/etc/wan-failover/mail.env` | `sudo mkdir -p /etc/wan-failover && sudo cp mail.env /etc/wan-failover/mail.env && sudo chmod 600 /etc/wan-failover/mail.env` |
-| `wan-failover-resume.sh` (optional, suspend/resume) | `/usr/lib/systemd/system-sleep/wan-failover-resume.sh` | `sudo cp wan-failover-resume.sh /usr/lib/systemd/system-sleep/wan-failover-resume.sh && sudo chmod +x /usr/lib/systemd/system-sleep/wan-failover-resume.sh` |
-| `docker/` (whole folder) | anywhere permanent, e.g. `/opt/wan-dashboard/` | `sudo mkdir -p /opt/wan-dashboard && sudo cp -r docker/* /opt/wan-dashboard/` |
+[![Shell Script](https://img.shields.io/badge/Shell-Bash-4EAA25?logo=gnu-bash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Flask](https://img.shields.io/badge/Flask-Dashboard-000000?logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Nothing else needs to be copied anywhere — `/var/lib/wan-failover/` (status,
-override, override_expiry files) is created automatically by the script the
-first time it runs.
+---
 
-## Full install, in order
+## What is this?
+
+If your server has more than one internet connection — multiple ISPs,
+multiple physical NICs, or a mix of fiber/broadband/LTE for redundancy —
+this project keeps it online automatically. It's a practical alternative
+to expensive dedicated multi-WAN routers (like Peplink or Cisco failover
+appliances) for anyone comfortable running a script on their own Linux box.
+
+**In plain terms:** it watches your internet connections, and the instant
+one stops working, it silently reroutes your server's traffic through a
+working one — no downtime, no manual intervention, and you get an email
+the moment it happens.
+
+## Who this is for
+
+- Self-hosters and homelabbers running a server with 2+ internet lines
+- Small businesses/offices with a primary ISP and a backup line
+- Anyone running a VoIP server, game server, or public-facing service
+  who can't afford a single ISP outage to mean total downtime
+- Sysadmins who want multi-WAN failover without buying dedicated hardware
+
+## Features
+
+- 🔁 **Automatic failover & failback** — always prefers your primary
+  connection, falls back through however many backup connections you
+  have, and automatically switches back the instant the primary recovers.
+- 🌐 **Zero hardcoded network config** — reads gateways live from the
+  routing table and detects unplugged cables via link state, so it adapts
+  to DHCP changes or physical changes without editing the script.
+- 📧 **Email alerts** — a clearly-written email every time traffic
+  switches, explaining *why* (automatic failover vs. manual override)
+  and *what happened*, not just a bare status code.
+- 🖥️ **Web dashboard** — see which connection is active at a glance
+  (green/red status), and manually pin traffic to a specific connection
+  for a chosen duration (minutes to days) if you need to.
+- 🔐 **Email OTP login** — the dashboard is protected by a one-time-code
+  login sent to your inbox, no separate password to manage or leak.
+- 🐳 **Docker-based dashboard** — deploys behind your existing reverse
+  proxy (Nginx Proxy Manager, Traefik, Caddy) with no extra ports to open.
+- ⏱️ **Timed manual override** — pin traffic to a specific connection
+  for 1 minute up to 7 days, or indefinitely, with automatic revert to
+  the default failover logic when the timer runs out.
+- 🪶 **Lightweight** — a Bash script + a small Flask app. No heavyweight
+  network stack, no proprietary firmware, runs on any modern Ubuntu/Debian
+  server.
+
+## How it works
+
+```
+┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐
+│  eth0   │     │  eth1   │     │  eth2   │     │  eth3   │   <- your physical
+│(primary)│     │(backup1)│     │(backup2)│     │(backup3)│      uplinks
+└────┬────┘     └────┬────┘     └────┬────┘     └────┬────┘
+     │               │               │               │
+     └───────────────┴───────┬───────┴───────────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │  wan-failover.sh   │  <- checks every 10s:
+                    │  (systemd service) │     link up? gateway alive?
+                    └─────────┬─────────┘     ping reachable?
+                              │
+              ┌───────────────┼───────────────┐
+              │               │               │
+    ┌─────────▼──────┐ ┌──────▼──────┐ ┌──────▼───────┐
+    │ ip route switch │ │ email alert │ │ status.json  │
+    │ (kernel routing)│ │  (SMTP)     │ │ (for dashboard)│
+    └──────────────────┘ └─────────────┘ └──────┬───────┘
+                                                  │
+                                        ┌─────────▼─────────┐
+                                        │  Web Dashboard      │
+                                        │  (Docker + Flask)   │
+                                        │  OTP login + manual │
+                                        │  switch controls     │
+                                        └─────────────────────┘
+```
+
+Every 10 seconds, the script pings out through each interface, in
+priority order. The first healthy one becomes the active default route.
+If your top-priority connection recovers later, it's re-checked first
+every cycle — so traffic always returns to it automatically.
+
+## Quick start
+
+### 1. Install the failover script (on the host)
 
 ```bash
-# 1. Host script
 sudo mkdir -p /var/lib/wan-failover
-sudo cp wan-failover.sh /usr/local/bin/wan-failover.sh
-sudo chmod +x /usr/local/bin/wan-failover.sh
+sudo cp scripts/wan-failover.sh /usr/local/bin/wan-failover.sh
+sudo cp scripts/wan-mail-send.py /usr/local/bin/wan-mail-send.py
+sudo chmod +x /usr/local/bin/wan-failover.sh /usr/local/bin/wan-mail-send.py
 
-# 2. systemd service
-sudo cp wan-failover.service /etc/systemd/system/wan-failover.service
+sudo cp scripts/wan-failover.service /etc/systemd/system/wan-failover.service
 sudo systemctl daemon-reload
-
-# 3. Email config (already filled with your SMTP — just set MAIL_TO)
-sudo mkdir -p /etc/wan-failover
-sudo cp mail.env /etc/wan-failover/mail.env
-sudo nano /etc/wan-failover/mail.env      # set MAIL_TO to the real recipient
-sudo chmod 600 /etc/wan-failover/mail.env
-
-# 4. Start it
-sudo systemctl enable --now wan-failover
-sudo systemctl restart wan-failover
-journalctl -t wan-failover -f
-
-# 5. (optional) suspend/resume hook
-sudo cp wan-failover-resume.sh /usr/lib/systemd/system-sleep/wan-failover-resume.sh
-sudo chmod +x /usr/lib/systemd/system-sleep/wan-failover-resume.sh
-
-# 6. Dashboard container
-sudo mkdir -p /opt/wan-dashboard
-sudo cp -r docker/* /opt/wan-dashboard/
-cd /opt/wan-dashboard
-docker compose up -d --build
-docker compose logs -f
 ```
 
-## About the SMTP details you sent
+### 2. Configure your interface priority
 
-Mapped into `mail.env` like this:
+Open `scripts/wan-failover.sh` and edit the `PRIORITY` array near the top
+to match your actual interface names (find them with `ip link`):
 
-| Your value | Goes into |
-|---|---|
-| `MAIL_HOST=mail.example.in` | `SMTP_HOST` / `SMTP_URL` |
-| `MAIL_PORT=587` | `SMTP_PORT` — 587 means STARTTLS, so `SMTP_URL=smtp://...` + `SMTP_SSL_REQD=1` (already set) |
-| `MAIL_USERNAME=noreply@example.in` | `SMTP_USER` |
-| `MAIL_PASSWORD` | `SMTP_PASS` — quoted in the file since it contains a comma/dash |
-| `MAIL_FROM_ADDRESS` | `MAIL_FROM` |
-
-**Two things to double check yourself:**
-1. Your password as pasted was `" -,hESExT,28"` (looked like it might have a
-   leading space). I stripped that assuming it was just formatting when you
-   pasted it — if the real password does start with a space, edit
-   `SMTP_PASS` in `mail.env` accordingly.
-2. **`MAIL_TO` is currently a placeholder** (`you@yourdomain.com`) — I don't
-   have the address you want alerts delivered *to*. Set that in
-   `/etc/wan-failover/mail.env` before it'll actually send anywhere useful.
-
-Test it after setup:
 ```bash
-tail -f /var/log/wan-failover-mail.log
+PRIORITY=(eth0 eth1 eth2 eth3)   # first = primary, rest = backup order
 ```
 
-## Timed manual override (new)
+### 3. Configure email alerts
 
-When you click **"Switch here"** on the dashboard, you now pick how long it
-should stay pinned to that interface from a dropdown next to the button:
+```bash
+sudo mkdir -p /etc/wan-failover
+sudo cp config/mail.env.example /etc/wan-failover/mail.env
+sudo nano /etc/wan-failover/mail.env      # fill in your SMTP details
+sudo chmod 600 /etc/wan-failover/mail.env
+```
 
-`15 min · 30 min · 1 hour · 3 hours · 6 hours · 12 hours · 1 day · 3 days · 7 days · Until I reset it`
+### 4. Start it
 
-- Once that timer runs out, the host script automatically reverts to **Auto**
-  mode on its own — no dashboard interaction needed — and Auto always means
-  "prefer eno4, then eno1, then eno2, then eno3," exactly like normal.
-- The mode bar at the top shows a live countdown ("Reverts to Auto in 2h 14m").
-- If you pick "Until I reset it," it stays manual forever until you click
-  Reset to Auto yourself.
-- If your manually-picked interface dies before the timer even runs out, it
-  still fails over immediately through the normal priority order (it doesn't
-  wait for the timer) — the timer only governs the return-to-Auto behavior
-  for a healthy manual pick.
+```bash
+sudo systemctl enable --now wan-failover
+journalctl -t wan-failover -f
+```
 
-## Nginx Proxy Manager mapping (unchanged from before)
+### 5. (Optional) Deploy the web dashboard
 
-Proxy Hosts → Add Proxy Host:
+```bash
+cd docker
+cp docker-compose.example.yml docker-compose.yml
+nano docker-compose.yml      # fill in SMTP + OTP recipient + a random session key
+docker compose up -d --build
+```
 
-| Field | Value |
-|---|---|
-| Domain Names | `wan.yourdomain.com` |
-| Scheme | `http` |
-| Forward Hostname/IP | `wan-dashboard` |
-| Forward Port | `5000` |
-| Websockets Support | off |
+Point your reverse proxy at the `wan-dashboard` container on port `5000`.
 
-SSL tab → Request Let's Encrypt cert, Force SSL on.
+Full setup, troubleshooting, and manual-switch-via-SSH instructions are in
+[`docs/`](docs/).
 
-No port is published from the container — NPM reaches it over
-`nginx-proxy-manager_default` by container name.
+## Manually switching connections via SSH
+
+You don't need the dashboard for manual control — you can pin traffic to
+any interface directly:
+
+```bash
+echo "eth1" | sudo tee /var/lib/wan-failover/override
+echo "0" | sudo tee /var/lib/wan-failover/override_expiry   # 0 = until you reset it
+```
+
+Revert to automatic mode:
+```bash
+echo "auto" | sudo tee /var/lib/wan-failover/override
+```
+
+## FAQ
+
+**How is this different from a multi-WAN router?**
+Dedicated multi-WAN hardware (Peplink, pfSense with multi-WAN, etc.) does
+more (like per-flow load balancing), but costs money and is another box
+to manage. This is free, runs on the server you already have, and does
+one thing well: active/backup failover with visibility and alerts.
+
+**Does this load-balance traffic across connections?**
+No — this is active/backup failover, not load balancing. One connection
+is "active" at a time; the others sit ready as backups. This is
+intentional: it keeps behavior predictable (no split sessions across
+different public IPs) which matters for things like VoIP, gaming, or
+stateful services.
+
+**What OS does this run on?**
+Built and tested for Ubuntu Server, should work on any modern
+systemd-based Linux distro (Debian, Ubuntu variants) with `ip`, `ping`,
+`curl`, `python3`, and `systemd` available.
+
+**Can I use this without the Docker dashboard?**
+Yes — the dashboard is entirely optional. The core failover script runs
+standalone with just systemd; the dashboard adds a UI and manual controls
+on top of it.
+
+## Contributing
+
+Issues and pull requests welcome. If you extend this for other distros,
+add DNS-based health checks, or add load-balancing support, open a PR.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+*Keywords: multi-wan failover linux, dual wan failover script, automatic
+ISP failover, network redundancy self-hosted, ubuntu failover router,
+internet connection monitor dashboard, self-hosted network failover,
+docker network dashboard, systemd network failover script.*
