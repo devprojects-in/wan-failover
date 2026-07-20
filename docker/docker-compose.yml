@@ -1,0 +1,30 @@
+services:
+  wan-dashboard:
+    build: .
+    container_name: wan-dashboard
+    restart: unless-stopped
+    volumes:
+      - /var/lib/wan-failover:/data
+    environment:
+      # SMTP (same account used for switch-alert emails)
+      SMTP_HOST: "mail.example.in"
+      SMTP_PORT: "587"
+      SMTP_USER: "noreply@example.in"
+      SMTP_PASS: "your password"
+      MAIL_FROM: "noreply@example.in"
+
+      # Who receives the login OTP code
+      OTP_RECIPIENT: "karanbir@example.com"
+
+      # Flask session signing key — change this to your own random
+      # string so logins survive container rebuilds/restarts. Generate
+      # one with: python3 -c "import secrets; print(secrets.token_hex(32))"
+      FLASK_SECRET_KEY: "CHANGE_ME_TO_A_RANDOM_64_CHAR_HEX_STRING"
+    networks:
+      - nginx-proxy-manager_default
+    # No "ports:" needed — Nginx Proxy Manager reaches this container
+    # directly over the shared docker network using its container name.
+
+networks:
+  nginx-proxy-manager_default:
+    external: true
